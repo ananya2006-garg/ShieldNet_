@@ -1,0 +1,64 @@
+"""
+ShieldNet Database Engine
+SQLAlchemy session management with SQLite.
+"""
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from typing import Generator
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from backend.database.models import Base
+from backend.config import DATABASE_URL
+
+# ── Engine ───────────────────────────────────────────────────────
+# check_same_thread is a SQLite-only argument; skip it for other databases
+_engine_kwargs: dict = {"echo": False}
+if DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
+
+# Enable WAL mode and synchronous=NORMAL for SQLite to prevent locking
+if DATABASE_URL.startswith("sqlite"):
+    from sqlalchemy import event
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def init_db() -> None:
+    """Create all tables if they don't already exist. Drops existing tables first to clear on restart."""
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+
+@contextmanager
+def get_db_session() -> Generator[Session, None, None]:
+    """Context-manager session — use in scripts / background tasks."""
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def get_db() -> Generator[Session, None, None]:
+    """FastAPI dependency — yields one session per request."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
